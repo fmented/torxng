@@ -1,55 +1,39 @@
-#upgrading system
-echo  "
-Updating system
-"
-apt update && apt upgrade -y
+#!/bin/bash
 
-#installing required packages
-echo "
-Installing dependencies
-"
-apt install tor docker.io docker-compose -y
+GREEN_CLR='\033[1;32m'
+PURPLE_CLR='\033[1;35m'
+BOLD="\033[1m"
+RESET="\033[0m"
 
-#manual update docker-compose
-echo "
-Updating docker-compose binary
-"
-curl -L https://github.com/docker/compose/releases/download/v2.10.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
+print_step(){
+  echo -e "\n\n${BOLD}${GREEN_CLR}$1${RESET}\n"
+}
 
-#temporarily stop tor service if running
-service tor stop
+install_dependencies(){
+  print_step "Installing update"
+  apt update && apt upgrade
+  print_step "Installing dependencies"
+  apt install tor docker.io docker-compose
+  service tor stop
+}
 
-#clone searxng-docker
-echo "
-Cloning searcxng-docker repository
-"
-cd /usr/local
-git clone https://github.com/searxng/searxng-docker.git
-cd searxng-docker
+prompt_user_info(){
+  read -p "$(echo -e $PURPLE_CLR"\nEnter Instance Name: "$RESET)" instance
+  readonly INSTANCE=$instance
+  read -p "$(echo -e $PURPLE_CLR"Enter Email Address: "$RESET)" email
+  readonly EMAIL=$email
+}
 
-SECRET_KEY=$(openssl rand -hex 32)
-echo
-read -p "Enter Instance Name: " INSTANCE_NAME
+get_latest_docker_compose(){
+  print_step "Updating docker-compose"
+  arch=$(uname -m)
+  url=$(curl -s "https://api.github.com/repos/docker/compose/releases/latest" | grep  "docker-compose-linux-$arch" | grep "https" | tr -d \" | grep "$arch$" | cut -d : -f 2,3 )
+  curl -L $url -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+}
 
-echo "# see https://docs.searxng.org/admin/engines/settings.html#use-default-settings
-use_default_settings: true
-general:
-  instance_name: \"$INSTANCE_NAME\"
-server:
-  # base_url is defined in the SEARXNG_BASE_URL environment variable, see .env and docker-compose.yml
-  secret_key: \"$SECRET_KEY\"  # change this!
-  limiter: true  # can be disabled for a private instance
-  image_proxy: true
-ui:
-  static_use_hash: true
-redis:
-  url: redis://redis:6379/0
-outgoing:
-  request_timeout: 60.0
-  max_request_timeout: 120.0" > searxng/settings.yml
-
-echo "## Configuration file for a typical Tor user
+tor_setup(){
+  echo "## Configuration file for a typical Tor user
 ## Last updated 9 October 2013 for Tor 0.2.5.2-alpha.
 ## (may or may not work for much older or much newer versions of Tor.)
 ##
@@ -223,33 +207,61 @@ HiddenServiceVersion 3
 ## address manually to your friends, uncomment this line:
 #PublishServerDescriptor 0" > /etc/tor/torrc
 
-#start tor service again
-service tor start
-echo
+  #start tor service again
+  service tor start
+  #tor service needs some time to start
+  sleep 5
+  readonly ADDRESS=$(cat /var/lib/tor/hidden_service/hostname)
+}
 
-#tor service needs some time to start
-for i in 5 4 3 2 1
-do
-  case $i in
-   1) a="second" ;;
-   *) a="seconds" ;;
-  esac
-   echo "Please wait for $i $a"
-   sleep 1
-done
-echo
+searxng_setup(){
+  print_step "Processing searxng"
+  if [ -d "/usr/local/searxng-docker" ]
+    then
+    cd "/usr/local/searxng-docker" && docker-compose down
+    rm -rf "/usr/local/searxng-docker"
+  fi
+  cd /usr/local
+  echo
+  git clone https://github.com/searxng/searxng-docker.git
+  cd searxng-docker
+  print_step "Setting up tor"
+  tor_setup
 
-#setting up searxng-docker .env
-read -p "Enter Email Address: " EMAIL
-ADDRESS=$(cat /var/lib/tor/hidden_service/hostname)
-echo "# By default listen on https://localhost
+
+#setup settings.yml
+  print_step "Setting up searxng settings"
+echo "# see https://docs.searxng.org/admin/engines/settings.html#use-default-settings
+use_default_settings: true
+general:
+  instance_name: \"$INSTANCE\"
+server:
+  # base_url is defined in the SEARXNG_BASE_URL environment variable, see .env and docker-compose.yml
+  secret_key: \"$(openssl rand -hex 32)\"  # change this!
+  limiter: true  # can be disabled for a private instance
+  image_proxy: true
+ui:
+  static_use_hash: true
+redis:
+  url: redis://redis:6379/0
+outgoing:
+  request_timeout: 60.0
+  max_request_timeout: 120.0" > searxng/settings.yml
+
+
+
+#setup .env
+  print_step "Setting up .env"
+  echo "# By default listen on https://localhost
 # To change this:
 # * uncomment SEARXNG_HOSTNAME, and replace <host> by the SearXNG hostname
 # * uncomment LETSENCRYPT_EMAIL, and replace <email> by your email (require to create a Let's Encrypt certificate)
 SEARXNG_HOSTNAME=http://$ADDRESS
 LETSENCRYPT_EMAIL=$EMAIL" > .env
 
-#setting up Caddyfile
+
+#setup Caddyfile
+  print_step "Setting up Caddyfile"
 echo "{
   admin off
 }
@@ -327,14 +339,18 @@ echo "{
   }
 }" > Caddyfile
 
-#run docker containers in background
-echo "
-Running containers
-"
-docker-compose up -d
+  print_step "Running containers"
+  docker-compose up -d
+}
 
-echo "
-$INSTANCE_NAME is deployed.
-Please check $ADDRESS
-"
+show_deployment(){
+  echo -e "\n${BOLD}${PURPLE_CLR}$INSTANCE is deployed"
+  echo -e "\n${BOLD}${PURPLE_CLR}Please visit ${GREEN_CLR}$ADDRESS${RESET}"
+}
 
+
+prompt_user_info
+install_dependencies
+get_latest_docker_compose
+searxng_setup
+show_deployment
